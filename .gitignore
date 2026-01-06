@@ -1,0 +1,15 @@
+# ===== Python =====
+__pycache__/
+*.pyc
+.env
+
+# ===== Node =====
+node_modules/
+
+# ===== Runtime / Generated =====
+backend/uploads/
+backend/report_*.pdf
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
