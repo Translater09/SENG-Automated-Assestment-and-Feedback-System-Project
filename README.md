@@ -67,6 +67,7 @@ Each module produces:
 ```bash
 uvicorn app.main:app --reload
 
+```bash
 ### 🔹 Frontend
 npm install
 npm run dev
