@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AAFS Language Learning</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              // Özel renkler gerekirse buraya eklenir
+            }
+          }
+        }
+      }
+    </script>
+
+    <style>
+      /* Tüm yazı giriş alanlarını zorla KOYU TEMA yap */
+      input, textarea, select {
+        background-color: #1f2937 !important; /* Koyu Gri (Gray-800) */
+        color: #ffffff !important;           /* Beyaz Yazı */
+        border: 1px solid #374151 !important; /* Kenarlık (Gray-700) */
+      }
+      
+      /* Placeholder (İpucu yazısı) rengini gri yap */
+      input::placeholder, textarea::placeholder {
+        color: #9ca3af !important; /* Gray-400 */
+      }
+
+      /* Odaklanınca mavi çerçeve yak */
+      input:focus, textarea:focus, select:focus {
+        border-color: #3b82f6 !important; /* Blue-500 */
+        outline: none !important;
+      }
+
+      /* --- ÖZEL SCROLLBAR (Kaydırma Çubuğu) --- */
+      /* Sadece 'custom-scrollbar' sınıfı olanlarda veya genel olarak çalışır */
+      
+      /* Çubuğun genişliği */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+
+      /* Çubuğun arkasındaki yol */
+      ::-webkit-scrollbar-track {
+        background: #111827; /* Çok koyu lacivert */
+      }
+
+      /* Çubuğun kendisi (Hareket eden kısım) */
+      ::-webkit-scrollbar-thumb {
+        background: #374151; /* Gri */
+        border-radius: 4px;
+      }
+
+      /* Üzerine gelince rengi değişsin */
+      ::-webkit-scrollbar-thumb:hover {
+        background: #4b5563; /* Daha açık gri */
+      }
+    </style>
+
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
