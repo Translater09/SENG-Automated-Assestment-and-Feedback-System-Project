@@ -62,13 +62,14 @@ Each module produces:
 
 ## ▶️ How to Run the Project
 
-### 🔹 Backend
 
-```bash
+Backend :
+
 uvicorn app.main:app --reload
 
-```bash
-### 🔹 Frontend
+
+Frontend:
+
 npm install
 npm run dev
 
