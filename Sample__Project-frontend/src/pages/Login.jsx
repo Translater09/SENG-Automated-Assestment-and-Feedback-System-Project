@@ -9,13 +9,10 @@ const Login = () => {
   const [isNeon, setIsNeon] = useState(false); // Neon Modu
   const [isSwinging, setIsSwinging] = useState(false);
 
-  // Mevcut State'ler
-  const [isLogin, setIsLogin] = useState(true);
+  // Form State'leri
   const [formData, setFormData] = useState({
     email: '',
-    password: '',
-    first_name: '', 
-    last_name: ''   
+    password: ''
   });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -30,37 +27,44 @@ const Login = () => {
     setTimeout(() => setIsSwinging(false), 1000);
   };
 
-  const handleAuth = async (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
     setError("");
     setLoading(true);
 
     try {
-      if (isLogin) {
-        const res = await axios.post("http://127.0.0.1:8000/token", 
-          new URLSearchParams({
-            username: formData.email,
-            password: formData.password,
-          })
-        );
-        const token = res.data.access_token;
-        localStorage.setItem('token', token);
-        const userRes = await axios.get(`http://127.0.0.1:8000/users/me?token=${token}`);
-        localStorage.setItem('role', userRes.data.role);
-        localStorage.setItem('first_name', userRes.data.first_name);
+      // 1. Token İsteği
+      const res = await axios.post("http://127.0.0.1:8000/token", 
+        new URLSearchParams({
+          username: formData.email,
+          password: formData.password,
+        })
+      );
+      
+      const token = res.data.access_token;
+      localStorage.setItem('token', token);
 
-        if (userRes.data.role === 'student') navigate('/student/dashboard');
-        else if (userRes.data.role === 'teacher') navigate('/teacher/dashboard'); 
-        else navigate('/');
+      // 2. Kullanıcı Rolünü Öğren
+      const userRes = await axios.get(`http://127.0.0.1:8000/users/me?token=${token}`);
+      const role = userRes.data.role;
+      
+      localStorage.setItem('role', role);
+      localStorage.setItem('first_name', userRes.data.first_name);
 
+      // 3. Role Göre Yönlendirme (Admin Eklendi ✅)
+      if (role === 'admin') {
+          window.location.href = '/admin/users'; // Admin paneline zorla yönlendirme
+      } else if (role === 'teacher') {
+          navigate('/teacher/dashboard'); 
+      } else if (role === 'student') {
+          navigate('/student/dashboard');
       } else {
-        await axios.post("http://127.0.0.1:8000/register", { ...formData, role: "student" });
-        alert("Kayıt başarılı! Şimdi giriş yapabilirsiniz.");
-        setIsLogin(true);
+          navigate('/'); // Tanımsız rol
       }
+
     } catch (err) {
-      console.error("AUTH ERROR:", err);
-      setError(err.response?.data?.detail || "İşlem başarısız!");
+      console.error("LOGIN ERROR:", err);
+      setError("Giriş başarısız! Lütfen bilgilerinizi kontrol edin.");
     } finally {
       setLoading(false);
     }
@@ -140,7 +144,7 @@ const Login = () => {
                 </div>
             )}
 
-            <form onSubmit={handleAuth} className="space-y-5">
+            <form onSubmit={handleLogin} className="space-y-5">
                 <input type="email" name="email" placeholder="Email Adresi" value={formData.email} onChange={handleChange} required
                     className={`w-full p-3.5 rounded-xl outline-none transition-all duration-500
                         ${isNeon 
