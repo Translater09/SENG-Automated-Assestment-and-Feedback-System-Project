@@ -861,117 +861,180 @@ def get_notifications(token: str = Query(...), db: Session = Depends(get_db)):
     notifs = db.query(models.NotificationDB).filter(models.NotificationDB.user_id == user.id).order_by(models.NotificationDB.created_at.desc()).all()
     return [{"id": n.id, "message": n.message, "created_at": n.created_at, "is_read": n.is_read} for n in notifs]
 
-# [UC15] Improved Report Download (PDF FORMAT 📄)
+# --- GELİŞMİŞ TÜRKÇE KARAKTER DÜZELTİCİ ---
 
 
 @app.get("/report/download")
 async def download_weekly_report(token: str, db: Session = Depends(get_db)):
-    # 1. Kullanıcıyı doğrula ve verileri çek [cite: 104]
     user = get_current_user(token, db)
     
-    # Son 7 günlük aktiviteleri getir [cite: 112]
+    # 1. VERİLERİ ÇEK
     one_week_ago = datetime.utcnow() - timedelta(days=7)
     submissions = db.query(models.SubmissionDB).filter(
         models.SubmissionDB.student_id == user.id,
         models.SubmissionDB.created_at >= one_week_ago
     ).all()
 
-    if not submissions:
-        raise HTTPException(status_code=404, detail="Rapor icin yeterli veri bulunamadi.")
-
-    #  İstatistikleri ve Hoca Yorumlarını Hazırla [cite: 12, 114]
-    counts = {"WRITING": 0, "SPEAKING": 0, "QUIZ": 0}
+    # 2. İSTATİSTİKLERİ HAZIRLA
     stats = {"WRITING": [], "SPEAKING": [], "QUIZ": []}
-    teacher_feedbacks = []
-
+    
     for sub in submissions:
         atype = sub.activity_type.upper()
         if atype in stats:
-            counts[atype] += 1
-            # Hoca puan verdiyse onu, yoksa AI puanını al 
+            final_score = 0
             review = db.query(models.TeacherReviewDB).filter(models.TeacherReviewDB.submission_id == sub.id).first()
-            score = review.new_score if review else (sub.evaluation.score if sub.evaluation else 0)
-            stats[atype].append(score)
-            
-            # UC11: Öğretmen yorumu varsa listeye ekle 
-            if review and review.teacher_comment:
-                teacher_feedbacks.append({
-                    "type": sub.activity_type.capitalize(),
-                    "date": sub.created_at.strftime("%d.%m.%Y"),
-                    "comment": review.teacher_comment
-                })
+            if review and review.new_score is not None:
+                final_score = review.new_score
+            else:
+                if hasattr(sub, "ai_score") and sub.ai_score is not None: final_score = sub.ai_score
+                elif hasattr(sub, "score") and sub.score is not None: final_score = sub.score
+                elif hasattr(sub, "evaluation") and sub.evaluation and hasattr(sub.evaluation, "score"): final_score = sub.evaluation.score
+            stats[atype].append(final_score)
 
-    # 3. PDF Oluşturma ve Karakter Fix 
+    # 3. AI ANALİZİ
+    ai_data = await get_challenges(token, db)
+    pattern_text = ai_data.get("pattern_found", "Yeterli veri yok.") if ai_data else "Yeterli veri yok."
+    recommendation_text = ai_data.get("recommendation", "Bol bol pratik yapmaya devam et!") if ai_data else "Pratik yapmaya devam!"
+
+    # --- 4. PDF OLUŞTURMA (TAM YOL İLE FONT YÜKLEME) ---
     pdf = FPDF()
     pdf.add_page()
     
-    # Profesyonel Karakter Temizliği
-    def tr(text):
+    report_font = 'Arial' 
+    use_unicode = False   
+
+    try:
+        # [ÖNEMLİ] Dosyanın Tam Yolunu Buluyoruz
+        # main.py dosyasının olduğu klasörü al ve yanındaki fontu bul
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        font_path = os.path.join(current_dir, 'DejaVuSans.ttf')
+        
+        # Fontu Tam Yol ile Yükle
+        pdf.add_font('DejaVu', '', font_path, uni=True)
+        report_font = 'DejaVu'
+        use_unicode = True
+        print(f"✅ FONT BAŞARIYLA YÜKLENDİ: {font_path}") # Terminalde bunu görürsen tamamdır
+    except Exception as e:
+        print(f"❌ FONT YÜKLENEMEDİ: {e}")
+        print(f"Aranan Yol: {font_path}")
+        report_font = 'Arial'
+        use_unicode = False
+
+    # Metin Yazdırma Yardımcısı
+    def txt(text):
         if not text: return ""
-        maps = {"ş":"s", "Ş":"S", "ğ":"g", "Ğ":"G", "ç":"c", "Ç":"C", "ı":"i", "İ":"I", "ö":"o", "Ö":"O", "ü":"u", "Ü":"U"}
-        for k, v in maps.items(): text = text.replace(k, v)
+        if use_unicode: return text 
+        
+        # Arial Fallback
+        replacements = {
+            "ş": "s", "Ş": "S", "ğ": "g", "Ğ": "G", "ç":"c", "Ç":"C",
+            "ı": "i", "İ": "I", "ö": "o", "Ö": "O", "ü": "u", "Ü": "U"
+        }
+        for old, new in replacements.items(): text = text.replace(old, new)
         return text
 
-    # --- RAPOR TASARIMI ---
-    # Başlık [cite: 112]
-    pdf.set_font("Arial", 'B', 18)
-    pdf.cell(200, 15, txt=tr("HAFTALIK AKADEMIK GELISIM RAPORU"), ln=True, align='C')
+    # BAŞLIK
+    pdf.set_font(report_font, '', 16) 
+    pdf.set_text_color(26, 35, 126)
+    pdf.cell(0, 10, txt=txt("AAFS - AKADEMİK GELİŞİM RAPORU"), ln=True, align='C')
+    
+    # ALT BAŞLIK
+    pdf.set_font(report_font, '', 10)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 8, txt=txt(f"Öğrenci: {user.first_name} {user.last_name} | Tarih: {datetime.now().strftime('%d.%m.%Y')}"), ln=True, align='C')
+    
+    pdf.set_draw_color(200, 200, 200)
+    pdf.line(10, 30, 200, 30)
+    pdf.ln(10)
+
+    # BÖLÜM 1: GRAFİKLER
+    pdf.set_font(report_font, '', 12)
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_fill_color(240, 240, 245)
+    pdf.cell(0, 10, txt=txt("1. HAFTALIK PERFORMANS ÖZETİ"), ln=True, fill=True)
     pdf.ln(5)
 
-    # 1. AKTİVİTE İSTATİSTİKLERİ (FR9) 
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 10, txt=tr("1. HAFTALIK AKTIVITE OZETI"), ln=True)
-    pdf.set_font("Arial", size=10)
-    summary_txt = f"Toplam Gorev: {len(submissions)} | Writing: {counts['WRITING']} | Speaking: {counts['SPEAKING']} | Quiz: {counts['QUIZ']}"
-    pdf.cell(200, 8, txt=tr(summary_txt), ln=True)
-    pdf.ln(5)
-
-    # 2. ÖĞRETMEN GERİ BİLDİRİMLERİ (UC11) 
-    if teacher_feedbacks:
-        pdf.set_fill_color(240, 245, 255)
-        pdf.set_font("Arial", 'B', 12)
-        pdf.cell(0, 10, txt=tr("2. OGRETMEN DEGERLENDIRMELERI (TEACHER REVIEW)"), ln=True, fill=True)
-        pdf.set_font("Arial", size=10)
-        for fb in teacher_feedbacks:
-            pdf.multi_cell(0, 8, txt=tr(f"[{fb['date']} - {fb['type']}]: {fb['comment']}"))
-            pdf.ln(2)
-    else:
-        pdf.set_font("Arial", 'I', 10)
-        pdf.cell(0, 10, txt=tr("Henuz ogretmen tarafindan incelenmis aktivite bulunmamaktadir."), ln=True)
-
-    # 3. PERFORMANS GRAFİKLERİ 
-    pdf.ln(5)
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 10, txt=tr("3. BASARI ANALIZ GRAFIKLERI"), ln=True)
-    for activity, scores in stats.items():
+    categories = ["WRITING", "SPEAKING", "QUIZ"]
+    start_x = 40
+    base_y = pdf.get_y() + 40
+    
+    pdf.set_font(report_font, '', 10)
+    for i, cat in enumerate(categories):
+        scores = stats.get(cat, [])
         avg = sum(scores) / len(scores) if scores else 0
-        pdf.set_font("Arial", size=10)
-        pdf.cell(40, 8, txt=tr(f"{activity}: %{int(avg)}"), ln=False)
-        pdf.set_fill_color(220, 220, 220)
-        pdf.cell(100, 6, "", border=1, ln=False, fill=True)
-        pdf.set_x(50)
-        pdf.set_fill_color(63, 81, 181) # Profesyonel Indigo Mavi
-        pdf.cell(max(1, avg), 6, "", border=1, ln=True, fill=True)
-        pdf.ln(2)
+        if avg >= 70: pdf.set_fill_color(76, 175, 80)
+        elif avg >= 50: pdf.set_fill_color(255, 152, 0)
+        else: pdf.set_fill_color(244, 67, 54)
 
-    # 4. AI ANALİZİ  [cite: 110, 111]
-    challenge = await get_challenges(token, db)
-    if challenge:
-        pdf.ln(5)
-        pdf.set_fill_color(255, 240, 240)
-        pdf.set_font("Arial", 'B', 12)
-        pdf.set_text_color(200, 0, 0)
-        pdf.cell(0, 10, txt=tr("4. AI MENTOR ANALIZI VE ONERILER"), ln=True, fill=True)
-        pdf.set_font("Arial", 'B', 11)
-        pdf.set_text_color(0, 0, 0)
-        pdf.multi_cell(0, 8, txt=tr(f"{challenge['pattern_found']}"))
-        pdf.set_font("Arial", 'I', 10)
-        pdf.multi_cell(0, 8, txt=tr(f"Oneri: {challenge['recommendation']}"))
+        bar_height = (avg / 100) * 30
+        x_pos = start_x + (i * 45)
+        y_pos = base_y - bar_height
+        
+        if avg > 0:
+            pdf.rect(x_pos, y_pos, 30, bar_height, 'F')
+            pdf.set_xy(x_pos, y_pos - 5)
+            pdf.set_text_color(0,0,0)
+            pdf.cell(30, 5, txt=f"%{int(avg)}", align='C')
+        else:
+            pdf.set_xy(x_pos, base_y - 5)
+            pdf.set_text_color(150,150,150)
+            pdf.cell(30, 5, txt="-", align='C')
 
-    #  Dosyayı Kaydet ve Gönder 
-    report_name = f"report_{user.id}.pdf"
-    pdf.output(report_name)
-    return FileResponse(report_name, media_type='application/pdf', filename="Haftalik_Gelisim_Raporu.pdf")
+        pdf.set_xy(x_pos, base_y + 2)
+        pdf.set_text_color(0,0,0)
+        pdf.cell(30, 5, txt=txt(cat), align='C')
+
+    pdf.set_y(base_y + 15)
+
+    # BÖLÜM 2: AI ANALİZİ
+    pdf.ln(5)
+    pdf.set_font(report_font, '', 12)
+    pdf.set_fill_color(255, 235, 238)
+    pdf.cell(0, 10, txt=txt("2. YAPAY ZEKA (AI) ANALİZİ"), ln=True, fill=True)
+    pdf.ln(2)
+    
+    pdf.set_font(report_font, '', 11)
+    pdf.set_text_color(183, 28, 28)
+    pdf.multi_cell(0, 8, txt=txt(pattern_text))
+    
+    pdf.set_font(report_font, '', 10)
+    pdf.set_text_color(0, 0, 0)
+    pdf.multi_cell(0, 6, txt=txt(f"Öneri: {recommendation_text}"))
+
+    # BÖLÜM 3: HOCA YORUMLARI
+    pdf.ln(5)
+    pdf.set_font(report_font, '', 12)
+    pdf.set_fill_color(227, 242, 253)
+    pdf.cell(0, 10, txt=txt("3. EĞİTMEN GERİBİLDİRİMLERİ"), ln=True, fill=True)
+    pdf.ln(2)
+    
+    has_comments = False
+    for sub in submissions:
+        review = db.query(models.TeacherReviewDB).filter(models.TeacherReviewDB.submission_id == sub.id).first()
+        if review and review.teacher_comment:
+            has_comments = True
+            date_str = sub.created_at.strftime('%d.%m.%Y')
+            
+            pdf.set_fill_color(250, 250, 250)
+            pdf.set_draw_color(220, 220, 220)
+            
+            pdf.set_font(report_font, '', 10)
+            pdf.set_text_color(26, 35, 126)
+            pdf.cell(0, 8, txt=txt(f"[{date_str} - {sub.activity_type.upper()}]"), ln=True, fill=True, border='TLR')
+            
+            pdf.set_font(report_font, '', 10)
+            pdf.set_text_color(50, 50, 50)
+            pdf.multi_cell(0, 6, txt=txt(review.teacher_comment), fill=True, border='BLR')
+            pdf.ln(2)
+
+    if not has_comments:
+        pdf.set_font(report_font, '', 10)
+        pdf.set_text_color(150, 150, 150)
+        pdf.cell(0, 10, txt=txt("Bu hafta için henüz bir eğitmen yorumu bulunmamaktadır."), ln=True)
+
+    report_filename = f"Rapor_{user.id}_{datetime.now().strftime('%Y%m%d')}.pdf"
+    pdf.output(report_filename)
+    return FileResponse(report_filename, media_type='application/pdf', filename=report_filename)
 @app.get("/analytics/repeated-mistakes")
 def get_repeated_mistakes_endpoint(token: str = Query(...), db: Session = Depends(get_db)):
     user = get_current_user(token, db)
@@ -991,7 +1054,7 @@ def get_repeated_mistakes_endpoint(token: str = Query(...), db: Session = Depend
     ]
     
     return {"repeated_mistakes": data}
-# [UC7 & UC8] Challenge Detection & Feedback Generation
+#  Challenge Detection & Feedback Generation
 @app.get("/student/challenges")
 async def get_challenges(token: str, db: Session = Depends(get_db)):
     user = get_current_user(token, db)
@@ -1022,7 +1085,7 @@ async def get_challenges(token: str, db: Session = Depends(get_db)):
         topic = "Çoğul Ekleri ve Sayılabilen İsimler"
         advice = "İsimlerin çoğul hallerinde ve 'a/an' kullanımında hatalar yapıyorsun. Sayılabilen (Countable) isimlere çalışmalısın."
     else:
-        # Genel ama dökümana uygun aksiyon odaklı feedback (UC8) [cite: 111]
+        # Genel ama dökümana uygun aksiyon odaklı feedback 
         topic = "Genel Dilbilgisi ve Sözlük Dağarcığı"
         advice = "Hataların belirli bir konuda yoğunlaşmıyor ancak cümle kurarken temel yapıları (S-V-O) daha dikkatli kurmalısın."
 
@@ -1079,7 +1142,7 @@ def delete_user(user_id: str, token: str = Query(...), db: Session = Depends(get
         db.query(models.NotificationDB).filter(models.NotificationDB.user_id == target_user.id).delete()
         
         # 3. [KRİTİK] Audit Loglarını (Geçmiş Kayıtlarını) Sil
-        # Hata veren kısım burasıydı, bu satır sorunu çözer.
+        
         db.query(models.AuditLogDB).filter(models.AuditLogDB.user_id == target_user.id).delete()
 
         # 4. Tokenları temizle
