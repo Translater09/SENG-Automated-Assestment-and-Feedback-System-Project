@@ -36,6 +36,9 @@ const Quiz = () => {
       }, { params: { token } });
       
       const newQuestions = res.data.questions || [];
+      // QUIZ ID'sini kaydet (Backend puanlama için gerekli)
+      localStorage.setItem('current_quiz_id', res.data.quiz_id);
+      
       setQuestions(newQuestions);
       setAnswers({}); // Yeni quiz gelince cevapları sıfırla
       
@@ -52,6 +55,15 @@ const Quiz = () => {
 
   // --- 2. CEVAP SEÇİLDİĞİNDE YEDEKLEME ---
   const handleSelectOption = (idx, opt) => {
+    // Soru ID'sini bulmak için questions array'ini kullanıyoruz
+    // Ancak array index bazlı gidiyoruz, backend ID istiyor olabilir.
+    // Backend modeline baktık: answers: Dict[str, str]  # question_id -> chosen_option
+    // Bu durumda bizim questions state'imizdeki objelerin ID'si önemli.
+    
+    // Frontend'de questions[idx].id var mı? Evet, backend dönüyor.
+    // O zaman state'imizi index yerine ID bazlı yapabiliriz veya gönderirken çevirebiliriz.
+    // Mevcut yapı index kullanıyor.
+    
     const updatedAnswers = {...answers, [idx]: opt};
     setAnswers(updatedAnswers);
     // Cevapları anlık yedekle
@@ -60,7 +72,7 @@ const Quiz = () => {
 
   // 2. CEVAPLARI GÖNDER
   const handleSubmitQuiz = async () => {
-    // --- YENİ EKLENEN KONTROL: Hepsi işaretlendi mi? ---
+    // --- KONTROL: Hepsi işaretlendi mi? ---
     if (Object.keys(answers).length !== questions.length) {
         alert("⚠️ Lütfen tüm soruları cevaplayınız!");
         return;
@@ -68,28 +80,47 @@ const Quiz = () => {
 
     setSubmitting(true);
     
-    // Cevapları metin formatına getiriyoruz
-    let quizContent = questions.map((q, index) => {
-        return `Question ${index+1}: ${q.question}\nStudent Answer: ${answers[index]}\n`;
-    }).join("\n---\n");
+    // Backend'in beklediği format:
+    // class QuizSubmitRequest(BaseModel):
+    //     quiz_id: str
+    //     answers: Dict[str, str]  # question_id -> chosen_option
+
+    const quizId = localStorage.getItem('current_quiz_id');
+    if (!quizId) {
+        alert("Quiz kimliği bulunamadı. Lütfen sayfayı yenileyip yeni quiz oluşturun.");
+        setSubmitting(false);
+        return;
+    }
+
+    // Cevapları index'ten Question ID'ye çevir
+    const formattedAnswers = {};
+    questions.forEach((q, index) => {
+        // questions[index] -> q
+        // answers[index] -> öğrencinin cevabı
+        if (answers[index]) {
+            formattedAnswers[q.id] = answers[index];
+        }
+    });
 
     try {
-      const response = await axios.post("http://127.0.0.1:8000/submit-assignment", {
-        token: token,
-        activity_type: "quiz",
-        content: quizContent
+      // ARTIK deterministik endpoint'e atıyoruz
+      const response = await axios.post(`http://127.0.0.1:8000/mcq/quiz/submit?token=${token}`, {
+        quiz_id: quizId,
+        answers: formattedAnswers
       });
       
       // --- BAŞARILI GÖNDERİM SONRASI YEDEKLERİ TEMİZLE ---
       localStorage.removeItem('quiz_questions');
       localStorage.removeItem('quiz_progress');
+      localStorage.removeItem('current_quiz_id');
 
       // --- DÜZELTME: Dashboard yerine Sonuç Ekranına git ---
+      // Backend'den dönen yapı: { score, correct, total, feedback }
       navigate('/results', { state: { result: response.data } });
 
     } catch (error) {
       console.error(error);
-      alert("Sonuçlar gönderilemedi. İnternetini kontrol et, cevapların sistemde kayıtlı!");
+      alert("Sonuçlar gönderilemedi. " + (error.response?.data?.detail || "Bağlantı hatası"));
     } finally {
       setSubmitting(false);
     }
