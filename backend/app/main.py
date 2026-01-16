@@ -1,4 +1,5 @@
 import os
+import random
 import uuid
 import shutil
 import json
@@ -112,7 +113,12 @@ def notify_class_teacher(db: Session, student_id: str, activity_type: str):
 # ---------------------------------------------------------
 # 📝 PYDANTIC MODELLER (REQUEST/RESPONSE SCHEMAS)
 # ---------------------------------------------------------
-
+class QuizWrapper:
+    def __init__(self, id, questions, difficulty):
+        self.id = id
+        self.questions = questions
+        self.difficulty = difficulty
+        
 class UserCreate(pydantic.BaseModel):
     email: str
     password: str
@@ -286,24 +292,115 @@ async def submit_writing(
 #  AI Quiz Oluşturma Endpoint'i 
 #  GERÇEK AI Quiz Oluşturma Endpoint'i
 @app.post("/quiz/generate")
-async def generate_mcq_quiz(request: QuizRequest, token: str = Query(...), db: Session = Depends(get_db)):
-    # 1. Kullanıcıyı doğrula
+async def generate_mcq_quiz(
+    request: QuizRequest,
+    token: str = Query(...),
+    db: Session = Depends(get_db)
+):
     user = get_current_user(token, db)
-    
-    # 2. Varsayılan konu ayarı
+
+    # 1. Konu ve Zorluk
     topic = request.topic if request.topic else "General English"
     difficulty = request.difficulty if request.difficulty else "Medium"
 
-    # 3. MOCK DATA YOK! Gerçekten AI servisine gidiyoruz:
-    questions = await ai_service.generate_mcq_quiz(topic, difficulty)
-    
-    # Eğer AI bir sebeple boş dönerse (API hatası vb.) kullanıcıya bilgi verelim
-    if not questions:
-        raise HTTPException(status_code=500, detail="AI şu an soru üretemedi, lütfen tekrar deneyin.")
+    # 2. Rastgelelik
+    unique_seed = str(uuid.uuid4())
+    styles = ["daily life", "business", "travel", "academic", "storytelling"]
+    selected_style = random.choice(styles)
 
-    return {"questions": questions}
-#  Genel Ödev Gönderim Endpoint'i (Writing & Quiz)
-#  Genel Ödev Gönderim Endpoint'i (GÜNCELLENDİ v2)
+    # 3. 🔒 GRAMMAR / TENSES NET TESPİTİ
+    grammar_keywords = [
+        "grammar", "tense", "tenses",
+        "present", "past", "future",
+        "conditional", "if clause",
+        "passive", "reported speech"
+    ]
+
+    is_grammar = any(k in topic.lower() for k in grammar_keywords)
+
+    # 4. PROMPT OLUŞTURMA
+    if is_grammar:
+        # --- 🔥 GRAMMAR MODU ---
+        final_prompt = f"""
+SYSTEM OVERRIDE: YOU ARE A STRICT GRAMMAR EXAM GENERATOR.
+
+ABSOLUTE RULES:
+- Generate ONLY grammar-based fill-in-the-blank questions.
+- Each question MUST test verb tense or grammatical structure related to "{topic}".
+- DO NOT ask word meanings, synonyms, or reading comprehension.
+- If a question does NOT test grammar or tense, it is INVALID.
+
+MANDATORY QUESTION FORMAT:
+Sentence with ONE blank testing grammar.
+
+EXAMPLE:
+"If she ___ earlier, she would have caught the bus."
+A) leaves B) left C) had left D) has left
+
+TASK: Generate EXACTLY 5 multiple choice questions.
+STYLE: {selected_style} (ONLY for sentence context)
+DIFFICULTY: {difficulty}
+[Seed: {unique_seed}]
+"""
+    else:
+        # --- KELİME & GENEL MOD ---
+        final_prompt = f"""
+MODE: VOCABULARY & USAGE
+TOPIC: {topic}
+CONTEXT: {selected_style}
+TASK: Generate 5 engaging multiple choice questions.
+INSTRUCTIONS: Focus on vocabulary meaning, usage, or comprehension.
+DIFFICULTY: {difficulty}
+[Seed: {unique_seed}]
+"""
+
+    # 5. AI Servisine Gönder
+    questions = await ai_service.generate_mcq_quiz(final_prompt, difficulty)
+
+    if not questions:
+        raise HTTPException(status_code=500, detail="AI soru üretemedi.")
+
+    # 6. 🛡️ FAIL-SAFE (SADECE GRAMMAR İÇİN DEVREYE GİRER)
+    # Düzeltme: Bu bloğu sadece is_grammar True ise çalıştırıyoruz!
+    if is_grammar:
+        banned_phrases = [
+            "closest in meaning", "what does", "definition",
+            "synonym", "mean?", "which word means"
+        ]
+
+        filtered_questions = []
+
+        for q in questions:
+            text = q.question.lower()
+
+            # 1. Yasaklı kelime var mı?
+            if any(bp in text for bp in banned_phrases):
+                continue
+            
+            # 2. Boşluk (___) var mı?
+            if "___" not in q.question:
+                continue
+
+            filtered_questions.append(q)
+
+        # Eğer sağlam soru sayısı 5'ten azsa hata ver
+        if len(filtered_questions) < 5:
+            # (Opsiyonel: Hata vermek yerine olduğu kadarını döndürebilirsin ama katı olmak iyidir)
+             raise HTTPException(
+                status_code=500,
+                detail="Grammar mode failed: AI produced non-grammar questions."
+            )
+        
+        # Filtrelenmiş temiz soruları ana değişkene ata
+        questions = filtered_questions
+
+    quiz_id = str(uuid.uuid4())
+    storage.quizzes[quiz_id] = QuizWrapper(quiz_id, questions, difficulty) # <-- BUNU EKLEMEZSEN AI PUANLAYAMAZ
+    
+    return {"quiz_id": quiz_id, "questions": questions}
+
+
+
 @app.post("/submit-assignment")
 async def submit_assignment_unified(
     req: UnifiedSubmissionRequest, 
@@ -444,15 +541,76 @@ async def submit_speaking(
     }
 # [UC4] Quiz Submission
 @app.post("/mcq/quiz/submit")
-async def submit_mcq_quiz(req: schemas.QuizSubmitRequest, token: str = Query(...), db: Session = Depends(get_db)):
+async def submit_mcq_quiz(
+    req: schemas.QuizSubmitRequest, 
+    token: str = Query(...), 
+    db: Session = Depends(get_db)
+):
     user = get_current_user(token, db)
+    
+    # 1. Quiz'i Hafızadan Bul
     quiz = storage.quizzes.get(req.quiz_id)
-    if not quiz: raise HTTPException(404, "Quiz bulunamadı veya süresi doldu.")
+    if not quiz: 
+        raise HTTPException(404, "Quiz bulunamadı veya süresi doldu.")
 
     correct = 0
-    mistakes_text = []
+    mistakes_list_for_ai = [] 
+    mistakes_db_objects = [] 
 
-    # 1. Submission Oluştur 
+    # 2. Soruları Kontrol Et (PYTHON İLE KESİN HESAP)
+    for q in quiz.questions:
+        student_answer = str(req.answers.get(q.id, "")).strip()
+        correct_answer = str(q.correct_answer).strip()
+        
+        # Karşılaştırma (Büyük/Küçük harf duyarsız)
+        if student_answer.lower() == correct_answer.lower():
+            correct += 1
+        else:
+            # Yanlış cevapları listele
+            mistakes_list_for_ai.append({
+                "question": q.question,
+                "your_answer": student_answer if student_answer else "Boş",
+                "correct_answer": correct_answer
+            })
+            
+            mistakes_db_objects.append(models.MistakeDB(
+                id=str(uuid.uuid4()),
+                submission_id=None, 
+                error_type="Wrong Answer",
+                description=f"Soru: {q.question} | Cevabın: {student_answer}",
+                suggestion="Review this topic." 
+            ))
+
+    # Skoru Hesapla (Kesin Matematik)
+    total_questions = len(quiz.questions)
+    score = int((correct / total_questions) * 100) if total_questions > 0 else 0
+    
+    # KONSOL ÇIKTISI (Kontrol etmen için)
+    print(f"DEBUG: Python Hesabı -> Doğru: {correct}/{total_questions} | Puan: {score}")
+
+    # 3. AI Servisinden Yorum İste
+    ai_comment_text = ""
+    detailed_feedback = []
+
+    try:
+        # AI'ya hataları gönderiyoruz, o da yorumluyor
+        ai_response = await ai_service.generate_mcq_feedback_tr_structured(score, mistakes_list_for_ai)
+        
+        # AI'nın 'summary'sini alıyoruz ama SKOR olarak değil, YORUM olarak kullanacağız
+        ai_comment_text = ai_response.get("summary", "Analiz tamamlandı.")
+        detailed_feedback = ai_response.get("question_feedback", [])
+        
+    except Exception as e:
+        print(f"AI Error: {e}")
+        ai_comment_text = "AI bağlantısında sorun oluştu, ancak skorunuz kaydedildi."
+        detailed_feedback = []
+
+    # --- [DÜZELTME BURASI] ---
+    # Skor bilgisini BİZ yazıyoruz (Python), AI'ya bırakmıyoruz.
+    # AI'nın yorumunu sadece sonuna ekliyoruz.
+    final_feedback_text = f"Sonuç: {total_questions} soruda {correct} doğru yaptınız. (Puan: {score})\n\nAI Yorumu: {ai_comment_text}"
+
+    # 4. Submission Oluştur 
     submission = models.SubmissionDB(
         id=str(uuid.uuid4()), 
         student_id=user.id,
@@ -462,47 +620,36 @@ async def submit_mcq_quiz(req: schemas.QuizSubmitRequest, token: str = Query(...
     db.add(submission)
     db.commit() 
 
-    
-    # 2. Soruları Kontrol Et
-    for q in quiz.questions:
-        student_answer = req.answers.get(q.id)
-        if student_answer == q.correct_answer:
-            correct += 1
-        else:
-            mistake_desc = f"Q: {q.question} | Your: {student_answer} | Correct: {q.correct_answer}"
-            mistakes_text.append(mistake_desc)
-            
-            db.add(models.MistakeDB(
-                submission_id=submission.id,
-                error_type="Wrong Answer",
-                description=mistake_desc,
-                suggestion="Review this topic."
-            ))
-
-    score = int((correct / len(quiz.questions)) * 100) if quiz.questions else 0
-    
-    # 3. Sonuç ve Feedback Kaydet
-    feedback_summary = f"Quiz Result: {correct}/{len(quiz.questions)} correct."
-    if mistakes_text:
-        feedback_summary += "\n\n❌ MISTAKES:\n" + "\n".join(mistakes_text)
-    else:
-        feedback_summary += "\n\n🎉 Perfect Score!"
-
+    # 5. Kayıt (Evaluation)
     evaluation = models.EvaluationDB(
         submission_id=submission.id,
-        score=score,
-        feedback_text=feedback_summary 
+        score=score,                    # <-- KESİN PYTHON SKORU
+        feedback_text=final_feedback_text # <-- BİZİM OLUŞTURDUĞUMUZ METİN
     )
     db.add(evaluation)
+
+    # 6. Hataları Kaydet
+    for m_db in mistakes_db_objects:
+        m_db.submission_id = submission.id
+        # AI önerilerini işle
+        for df in detailed_feedback:
+            if df.get("question") in m_db.description:
+                m_db.suggestion = f"Doğru: {df.get('correct_answer')} -> {df.get('explanation')}"
+        db.add(m_db)
+
     db.commit()
     
-    # 4. HOCAYA BİLDİRİM
+    # 7. Bildirimler
     notify_class_teacher(db, user.id, "Quiz")
-    
     log_action(db, user.id, "SUBMIT_QUIZ", f"Score: {score}")
 
-    return {"score": score, "correct": correct, "total": len(quiz.questions)}
-# ---------------------------------------------------------
+    return {
+        "score": score, 
+        "correct": correct, 
+        "total": total_questions,
+        # Frontend'de görünecek kısım
+        "feedback": final_feedback_text 
+    }
 # 👩‍🏫 TEACHER ENDPOINTS (GÜNCELLENMİŞ VE YENİLER)
 # ---------------------------------------------------------
 
@@ -861,117 +1008,180 @@ def get_notifications(token: str = Query(...), db: Session = Depends(get_db)):
     notifs = db.query(models.NotificationDB).filter(models.NotificationDB.user_id == user.id).order_by(models.NotificationDB.created_at.desc()).all()
     return [{"id": n.id, "message": n.message, "created_at": n.created_at, "is_read": n.is_read} for n in notifs]
 
-# [UC15] Improved Report Download (PDF FORMAT 📄)
+# --- GELİŞMİŞ TÜRKÇE KARAKTER DÜZELTİCİ ---
 
 
 @app.get("/report/download")
 async def download_weekly_report(token: str, db: Session = Depends(get_db)):
-    # 1. Kullanıcıyı doğrula ve verileri çek [cite: 104]
     user = get_current_user(token, db)
     
-    # Son 7 günlük aktiviteleri getir [cite: 112]
+    # 1. VERİLERİ ÇEK
     one_week_ago = datetime.utcnow() - timedelta(days=7)
     submissions = db.query(models.SubmissionDB).filter(
         models.SubmissionDB.student_id == user.id,
         models.SubmissionDB.created_at >= one_week_ago
     ).all()
 
-    if not submissions:
-        raise HTTPException(status_code=404, detail="Rapor icin yeterli veri bulunamadi.")
-
-    #  İstatistikleri ve Hoca Yorumlarını Hazırla [cite: 12, 114]
-    counts = {"WRITING": 0, "SPEAKING": 0, "QUIZ": 0}
+    # 2. İSTATİSTİKLERİ HAZIRLA
     stats = {"WRITING": [], "SPEAKING": [], "QUIZ": []}
-    teacher_feedbacks = []
-
+    
     for sub in submissions:
         atype = sub.activity_type.upper()
         if atype in stats:
-            counts[atype] += 1
-            # Hoca puan verdiyse onu, yoksa AI puanını al 
+            final_score = 0
             review = db.query(models.TeacherReviewDB).filter(models.TeacherReviewDB.submission_id == sub.id).first()
-            score = review.new_score if review else (sub.evaluation.score if sub.evaluation else 0)
-            stats[atype].append(score)
-            
-            # UC11: Öğretmen yorumu varsa listeye ekle 
-            if review and review.teacher_comment:
-                teacher_feedbacks.append({
-                    "type": sub.activity_type.capitalize(),
-                    "date": sub.created_at.strftime("%d.%m.%Y"),
-                    "comment": review.teacher_comment
-                })
+            if review and review.new_score is not None:
+                final_score = review.new_score
+            else:
+                if hasattr(sub, "ai_score") and sub.ai_score is not None: final_score = sub.ai_score
+                elif hasattr(sub, "score") and sub.score is not None: final_score = sub.score
+                elif hasattr(sub, "evaluation") and sub.evaluation and hasattr(sub.evaluation, "score"): final_score = sub.evaluation.score
+            stats[atype].append(final_score)
 
-    # 3. PDF Oluşturma ve Karakter Fix 
+    # 3. AI ANALİZİ
+    ai_data = await get_challenges(token, db)
+    pattern_text = ai_data.get("pattern_found", "Yeterli veri yok.") if ai_data else "Yeterli veri yok."
+    recommendation_text = ai_data.get("recommendation", "Bol bol pratik yapmaya devam et!") if ai_data else "Pratik yapmaya devam!"
+
+    # --- 4. PDF OLUŞTURMA (TAM YOL İLE FONT YÜKLEME) ---
     pdf = FPDF()
     pdf.add_page()
     
-    # Profesyonel Karakter Temizliği
-    def tr(text):
+    report_font = 'Arial' 
+    use_unicode = False   
+
+    try:
+        # [ÖNEMLİ] Dosyanın Tam Yolunu Buluyoruz
+        # main.py dosyasının olduğu klasörü al ve yanındaki fontu bul
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        font_path = os.path.join(current_dir, 'DejaVuSans.ttf')
+        
+        # Fontu Tam Yol ile Yükle
+        pdf.add_font('DejaVu', '', font_path, uni=True)
+        report_font = 'DejaVu'
+        use_unicode = True
+        print(f"✅ FONT BAŞARIYLA YÜKLENDİ: {font_path}") # Terminalde bunu görürsen tamamdır
+    except Exception as e:
+        print(f"❌ FONT YÜKLENEMEDİ: {e}")
+        print(f"Aranan Yol: {font_path}")
+        report_font = 'Arial'
+        use_unicode = False
+
+    # Metin Yazdırma Yardımcısı
+    def txt(text):
         if not text: return ""
-        maps = {"ş":"s", "Ş":"S", "ğ":"g", "Ğ":"G", "ç":"c", "Ç":"C", "ı":"i", "İ":"I", "ö":"o", "Ö":"O", "ü":"u", "Ü":"U"}
-        for k, v in maps.items(): text = text.replace(k, v)
+        if use_unicode: return text 
+        
+        # Arial Fallback
+        replacements = {
+            "ş": "s", "Ş": "S", "ğ": "g", "Ğ": "G", "ç":"c", "Ç":"C",
+            "ı": "i", "İ": "I", "ö": "o", "Ö": "O", "ü": "u", "Ü": "U"
+        }
+        for old, new in replacements.items(): text = text.replace(old, new)
         return text
 
-    # --- RAPOR TASARIMI ---
-    # Başlık [cite: 112]
-    pdf.set_font("Arial", 'B', 18)
-    pdf.cell(200, 15, txt=tr("HAFTALIK AKADEMIK GELISIM RAPORU"), ln=True, align='C')
+    # BAŞLIK
+    pdf.set_font(report_font, '', 16) 
+    pdf.set_text_color(26, 35, 126)
+    pdf.cell(0, 10, txt=txt("AAFS - AKADEMİK GELİŞİM RAPORU"), ln=True, align='C')
+    
+    # ALT BAŞLIK
+    pdf.set_font(report_font, '', 10)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 8, txt=txt(f"Öğrenci: {user.first_name} {user.last_name} | Tarih: {datetime.now().strftime('%d.%m.%Y')}"), ln=True, align='C')
+    
+    pdf.set_draw_color(200, 200, 200)
+    pdf.line(10, 30, 200, 30)
+    pdf.ln(10)
+
+    # BÖLÜM 1: GRAFİKLER
+    pdf.set_font(report_font, '', 12)
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_fill_color(240, 240, 245)
+    pdf.cell(0, 10, txt=txt("1. HAFTALIK PERFORMANS ÖZETİ"), ln=True, fill=True)
     pdf.ln(5)
 
-    # 1. AKTİVİTE İSTATİSTİKLERİ (FR9) 
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 10, txt=tr("1. HAFTALIK AKTIVITE OZETI"), ln=True)
-    pdf.set_font("Arial", size=10)
-    summary_txt = f"Toplam Gorev: {len(submissions)} | Writing: {counts['WRITING']} | Speaking: {counts['SPEAKING']} | Quiz: {counts['QUIZ']}"
-    pdf.cell(200, 8, txt=tr(summary_txt), ln=True)
-    pdf.ln(5)
-
-    # 2. ÖĞRETMEN GERİ BİLDİRİMLERİ (UC11) 
-    if teacher_feedbacks:
-        pdf.set_fill_color(240, 245, 255)
-        pdf.set_font("Arial", 'B', 12)
-        pdf.cell(0, 10, txt=tr("2. OGRETMEN DEGERLENDIRMELERI (TEACHER REVIEW)"), ln=True, fill=True)
-        pdf.set_font("Arial", size=10)
-        for fb in teacher_feedbacks:
-            pdf.multi_cell(0, 8, txt=tr(f"[{fb['date']} - {fb['type']}]: {fb['comment']}"))
-            pdf.ln(2)
-    else:
-        pdf.set_font("Arial", 'I', 10)
-        pdf.cell(0, 10, txt=tr("Henuz ogretmen tarafindan incelenmis aktivite bulunmamaktadir."), ln=True)
-
-    # 3. PERFORMANS GRAFİKLERİ 
-    pdf.ln(5)
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 10, txt=tr("3. BASARI ANALIZ GRAFIKLERI"), ln=True)
-    for activity, scores in stats.items():
+    categories = ["WRITING", "SPEAKING", "QUIZ"]
+    start_x = 40
+    base_y = pdf.get_y() + 40
+    
+    pdf.set_font(report_font, '', 10)
+    for i, cat in enumerate(categories):
+        scores = stats.get(cat, [])
         avg = sum(scores) / len(scores) if scores else 0
-        pdf.set_font("Arial", size=10)
-        pdf.cell(40, 8, txt=tr(f"{activity}: %{int(avg)}"), ln=False)
-        pdf.set_fill_color(220, 220, 220)
-        pdf.cell(100, 6, "", border=1, ln=False, fill=True)
-        pdf.set_x(50)
-        pdf.set_fill_color(63, 81, 181) # Profesyonel Indigo Mavi
-        pdf.cell(max(1, avg), 6, "", border=1, ln=True, fill=True)
-        pdf.ln(2)
+        if avg >= 70: pdf.set_fill_color(76, 175, 80)
+        elif avg >= 50: pdf.set_fill_color(255, 152, 0)
+        else: pdf.set_fill_color(244, 67, 54)
 
-    # 4. AI ANALİZİ  [cite: 110, 111]
-    challenge = await get_challenges(token, db)
-    if challenge:
-        pdf.ln(5)
-        pdf.set_fill_color(255, 240, 240)
-        pdf.set_font("Arial", 'B', 12)
-        pdf.set_text_color(200, 0, 0)
-        pdf.cell(0, 10, txt=tr("4. AI MENTOR ANALIZI VE ONERILER"), ln=True, fill=True)
-        pdf.set_font("Arial", 'B', 11)
-        pdf.set_text_color(0, 0, 0)
-        pdf.multi_cell(0, 8, txt=tr(f"{challenge['pattern_found']}"))
-        pdf.set_font("Arial", 'I', 10)
-        pdf.multi_cell(0, 8, txt=tr(f"Oneri: {challenge['recommendation']}"))
+        bar_height = (avg / 100) * 30
+        x_pos = start_x + (i * 45)
+        y_pos = base_y - bar_height
+        
+        if avg > 0:
+            pdf.rect(x_pos, y_pos, 30, bar_height, 'F')
+            pdf.set_xy(x_pos, y_pos - 5)
+            pdf.set_text_color(0,0,0)
+            pdf.cell(30, 5, txt=f"%{int(avg)}", align='C')
+        else:
+            pdf.set_xy(x_pos, base_y - 5)
+            pdf.set_text_color(150,150,150)
+            pdf.cell(30, 5, txt="-", align='C')
 
-    #  Dosyayı Kaydet ve Gönder 
-    report_name = f"report_{user.id}.pdf"
-    pdf.output(report_name)
-    return FileResponse(report_name, media_type='application/pdf', filename="Haftalik_Gelisim_Raporu.pdf")
+        pdf.set_xy(x_pos, base_y + 2)
+        pdf.set_text_color(0,0,0)
+        pdf.cell(30, 5, txt=txt(cat), align='C')
+
+    pdf.set_y(base_y + 15)
+
+    # BÖLÜM 2: AI ANALİZİ
+    pdf.ln(5)
+    pdf.set_font(report_font, '', 12)
+    pdf.set_fill_color(255, 235, 238)
+    pdf.cell(0, 10, txt=txt("2. YAPAY ZEKA (AI) ANALİZİ"), ln=True, fill=True)
+    pdf.ln(2)
+    
+    pdf.set_font(report_font, '', 11)
+    pdf.set_text_color(183, 28, 28)
+    pdf.multi_cell(0, 8, txt=txt(pattern_text))
+    
+    pdf.set_font(report_font, '', 10)
+    pdf.set_text_color(0, 0, 0)
+    pdf.multi_cell(0, 6, txt=txt(f"Öneri: {recommendation_text}"))
+
+    # BÖLÜM 3: HOCA YORUMLARI
+    pdf.ln(5)
+    pdf.set_font(report_font, '', 12)
+    pdf.set_fill_color(227, 242, 253)
+    pdf.cell(0, 10, txt=txt("3. EĞİTMEN GERİBİLDİRİMLERİ"), ln=True, fill=True)
+    pdf.ln(2)
+    
+    has_comments = False
+    for sub in submissions:
+        review = db.query(models.TeacherReviewDB).filter(models.TeacherReviewDB.submission_id == sub.id).first()
+        if review and review.teacher_comment:
+            has_comments = True
+            date_str = sub.created_at.strftime('%d.%m.%Y')
+            
+            pdf.set_fill_color(250, 250, 250)
+            pdf.set_draw_color(220, 220, 220)
+            
+            pdf.set_font(report_font, '', 10)
+            pdf.set_text_color(26, 35, 126)
+            pdf.cell(0, 8, txt=txt(f"[{date_str} - {sub.activity_type.upper()}]"), ln=True, fill=True, border='TLR')
+            
+            pdf.set_font(report_font, '', 10)
+            pdf.set_text_color(50, 50, 50)
+            pdf.multi_cell(0, 6, txt=txt(review.teacher_comment), fill=True, border='BLR')
+            pdf.ln(2)
+
+    if not has_comments:
+        pdf.set_font(report_font, '', 10)
+        pdf.set_text_color(150, 150, 150)
+        pdf.cell(0, 10, txt=txt("Bu hafta için henüz bir eğitmen yorumu bulunmamaktadır."), ln=True)
+
+    report_filename = f"Rapor_{user.id}_{datetime.now().strftime('%Y%m%d')}.pdf"
+    pdf.output(report_filename)
+    return FileResponse(report_filename, media_type='application/pdf', filename=report_filename)
 @app.get("/analytics/repeated-mistakes")
 def get_repeated_mistakes_endpoint(token: str = Query(...), db: Session = Depends(get_db)):
     user = get_current_user(token, db)
@@ -991,7 +1201,7 @@ def get_repeated_mistakes_endpoint(token: str = Query(...), db: Session = Depend
     ]
     
     return {"repeated_mistakes": data}
-# [UC7 & UC8] Challenge Detection & Feedback Generation
+#  Challenge Detection & Feedback Generation
 @app.get("/student/challenges")
 async def get_challenges(token: str, db: Session = Depends(get_db)):
     user = get_current_user(token, db)
@@ -1022,7 +1232,7 @@ async def get_challenges(token: str, db: Session = Depends(get_db)):
         topic = "Çoğul Ekleri ve Sayılabilen İsimler"
         advice = "İsimlerin çoğul hallerinde ve 'a/an' kullanımında hatalar yapıyorsun. Sayılabilen (Countable) isimlere çalışmalısın."
     else:
-        # Genel ama dökümana uygun aksiyon odaklı feedback (UC8) [cite: 111]
+        # Genel ama dökümana uygun aksiyon odaklı feedback 
         topic = "Genel Dilbilgisi ve Sözlük Dağarcığı"
         advice = "Hataların belirli bir konuda yoğunlaşmıyor ancak cümle kurarken temel yapıları (S-V-O) daha dikkatli kurmalısın."
 
@@ -1054,54 +1264,77 @@ def delete_user(user_id: str, token: str = Query(...), db: Session = Depends(get
     if not target_user: 
         raise HTTPException(404, "Kullanıcı bulunamadı")
     
-    try:
-        # --- HOCA KONTROLÜ ---
-        # Eğer hocanın sınıfı varsa silmeyi engelle
-        if target_user.role == "teacher":
-            teacher_class = db.query(models.ClassDB).filter(models.ClassDB.teacher_id == target_user.id).first()
-            if teacher_class:
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Bu hoca '{teacher_class.name}' sınıfının yöneticisi. Önce sınıfı silin veya başka hocaya atayın."
-                )
+    # Kendi kendini silmeyi engelle
+    if target_user.id == user.id:
+        raise HTTPException(400, "Kendinizi silemezsiniz.")
 
-        # --- TEMİZLİK OPERASYONU ---
+    try:
+        # --- HOCA İŞLEMLERİ ---
+        if target_user.role == "teacher":
+            teacher_classes = db.query(models.ClassDB).filter(models.ClassDB.teacher_id == target_user.id).all()
+            for t_class in teacher_classes:
+                # Sınıftaki öğrencileri serbest bırak
+                students_in_class = db.query(models.UserDB).filter(models.UserDB.class_id == t_class.id).all()
+                for s in students_in_class:
+                    s.class_id = None
+                    db.add(s) # Değişikliği işaretle
+                
+                # Sınıfı sil
+                db.delete(t_class)
+            
+            # Hoca yorumlarını sil
+            db.query(models.TeacherReviewDB).filter(models.TeacherReviewDB.teacher_id == target_user.id).delete()
+            db.flush() # Hoca verilerini veritabanına işle
+
+        # --- ÖĞRENCİ VE GENEL TEMİZLİK ---
         
-        # 1. Kullanıcının Ödevlerini (Submission) ve bağlı notlarını sil
+        # [KRİTİK HAMLE 1] Öğrenciyi Sınıftan Kopart (Öğrenciyse)
+        # Eğer bir sınıfa bağlıysa, önce o bağ koparılmalı ki User tablosundan rahat silinsin.
+        if target_user.class_id is not None:
+            target_user.class_id = None
+            db.add(target_user)
+            db.flush() # İlişkiyi hemen kes
+
+        # 1. Submission (Ödev) ve Alt Verileri Sil
         submissions = db.query(models.SubmissionDB).filter(models.SubmissionDB.student_id == target_user.id).all()
         for sub in submissions:
+            # Önce alt tabloları temizle (Cascade yoksa şarttır)
             db.query(models.EvaluationDB).filter(models.EvaluationDB.submission_id == sub.id).delete()
             db.query(models.MistakeDB).filter(models.MistakeDB.submission_id == sub.id).delete()
             db.query(models.TeacherReviewDB).filter(models.TeacherReviewDB.submission_id == sub.id).delete()
+            
+            # Sonra ödevi sil
             db.delete(sub)
+        
+        # [KRİTİK HAMLE 2] Ara Temizlik
+        # Submissionlar silindikten sonra veritabanını "Flush" yaparak rahatlatıyoruz.
+        db.flush() 
 
         # 2. Bildirimleri Sil
         db.query(models.NotificationDB).filter(models.NotificationDB.user_id == target_user.id).delete()
         
-        # 3. [KRİTİK] Audit Loglarını (Geçmiş Kayıtlarını) Sil
-        # Hata veren kısım burasıydı, bu satır sorunu çözer.
+        # 3. Logları Sil
         db.query(models.AuditLogDB).filter(models.AuditLogDB.user_id == target_user.id).delete()
 
-        # 4. Tokenları temizle
+        # 4. Tokenları temizle (Memory'den silme)
         keys_to_remove = [k for k, v in storage.tokens.items() if v == target_user.id]
         for k in keys_to_remove:
             del storage.tokens[k]
 
-        # --- SON VURUŞ: KULLANICIYI SİL ---
+        # --- SON VURUŞ (FİNAL SİLME) ---
         db.delete(target_user)
+        
+        # [KRİTİK HAMLE 3] Kalıcı Hale Getir
         db.commit()
 
-        # Loglama işlemini silinen kullanıcı için değil, silen admin (user.id) için yapıyoruz
         log_action(db, user.id, "DELETE_USER", f"Deleted user {target_user.email}")
         
-        return {"status": "success", "message": f"{target_user.email} silindi."}
+        return {"status": "success", "message": f"{target_user.email} ve verileri kalıcı olarak silindi."}
 
     except Exception as e:
-        db.rollback()
-        print(f"Silme Hatası: {e}")
-        # Hata detayını frontend'e gönderelim ki ne olduğunu görelim
+        db.rollback() # Hata olursa her şeyi geri al
+        print(f"Silme Hatası Detaylı: {e}")
         raise HTTPException(status_code=500, detail=f"Silme işlemi başarısız: {str(e)}")
-
 @app.get("/admin/stats")
 def get_admin_stats(token: str, db: Session = Depends(get_db)):
     user = get_current_user(token, db)
@@ -1122,30 +1355,30 @@ def get_admin_stats(token: str, db: Session = Depends(get_db)):
 # ---------------------------------------------------------
 @app.on_event("startup")
 def startup_event():
-    db = SessionLocal()
-    try:
-        # Öğrenci yoksa ekle
-        if not db.query(models.UserDB).filter(models.UserDB.email == "student@demo.com").first():
-            student = models.UserDB(
-                id=str(uuid.uuid4()), email="student@demo.com",
-                password_hash=_hash_password("1234"), role="student", first_name="Demo", last_name="Student"
-            )
-            db.add(student)
+    # db = SessionLocal()
+    # try:
+    #     # Öğrenci yoksa ekle - ARTIK EKLEME!
+    #     if not db.query(models.UserDB).filter(models.UserDB.email == "student@demo.com").first():
+    #         student = models.UserDB(
+    #             id=str(uuid.uuid4()), email="student@demo.com",
+    #             password_hash=_hash_password("1234"), role="student", first_name="Demo", last_name="Student"
+    #         )
+    #         db.add(student)
             
-        # Öğretmen yoksa ekle
-        if not db.query(models.UserDB).filter(models.UserDB.email == "teacher@demo.com").first():
-            teacher = models.UserDB(
-                id=str(uuid.uuid4()), email="teacher@demo.com",
-                password_hash=_hash_password("1234"), role="teacher", first_name="Demo", last_name="Teacher"
-            )
-            db.add(teacher)
-        db.commit()
-        print("✅ Demo users ready (student@demo.com / 1234)")
-    except Exception as e:
-        print(f"Startup Error: {e}")
-    finally:
-        db.close() 
-
+    #     # Öğretmen yoksa ekle - ARTIK EKLEME!
+    #     if not db.query(models.UserDB).filter(models.UserDB.email == "teacher@demo.com").first():
+    #         teacher = models.UserDB(
+    #             id=str(uuid.uuid4()), email="teacher@demo.com",
+    #             password_hash=_hash_password("1234"), role="teacher", first_name="Demo", last_name="Teacher"
+    #         )
+    #         db.add(teacher)
+    #     db.commit()
+    #     print("✅ Demo users check skipped.")
+    # except Exception as e:
+    #     print(f"Startup Error: {e}")
+    # finally:
+    #     db.close() 
+    pass # Fonksiyon boş kalmasın diye pass koyabilirsin
 # ---------------------------------------------------------
 # PROGRESS (HISTORY) ENDPOINT
 # ---------------------------------------------------------
