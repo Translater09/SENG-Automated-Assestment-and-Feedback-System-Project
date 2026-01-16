@@ -1,4 +1,5 @@
 import os
+import random
 import uuid
 import shutil
 import json
@@ -112,7 +113,12 @@ def notify_class_teacher(db: Session, student_id: str, activity_type: str):
 # ---------------------------------------------------------
 # 📝 PYDANTIC MODELLER (REQUEST/RESPONSE SCHEMAS)
 # ---------------------------------------------------------
-
+class QuizWrapper:
+    def __init__(self, id, questions, difficulty):
+        self.id = id
+        self.questions = questions
+        self.difficulty = difficulty
+        
 class UserCreate(pydantic.BaseModel):
     email: str
     password: str
@@ -286,24 +292,115 @@ async def submit_writing(
 #  AI Quiz Oluşturma Endpoint'i 
 #  GERÇEK AI Quiz Oluşturma Endpoint'i
 @app.post("/quiz/generate")
-async def generate_mcq_quiz(request: QuizRequest, token: str = Query(...), db: Session = Depends(get_db)):
-    # 1. Kullanıcıyı doğrula
+async def generate_mcq_quiz(
+    request: QuizRequest,
+    token: str = Query(...),
+    db: Session = Depends(get_db)
+):
     user = get_current_user(token, db)
-    
-    # 2. Varsayılan konu ayarı
+
+    # 1. Konu ve Zorluk
     topic = request.topic if request.topic else "General English"
     difficulty = request.difficulty if request.difficulty else "Medium"
 
-    # 3. MOCK DATA YOK! Gerçekten AI servisine gidiyoruz:
-    questions = await ai_service.generate_mcq_quiz(topic, difficulty)
-    
-    # Eğer AI bir sebeple boş dönerse (API hatası vb.) kullanıcıya bilgi verelim
-    if not questions:
-        raise HTTPException(status_code=500, detail="AI şu an soru üretemedi, lütfen tekrar deneyin.")
+    # 2. Rastgelelik
+    unique_seed = str(uuid.uuid4())
+    styles = ["daily life", "business", "travel", "academic", "storytelling"]
+    selected_style = random.choice(styles)
 
-    return {"questions": questions}
-#  Genel Ödev Gönderim Endpoint'i (Writing & Quiz)
-#  Genel Ödev Gönderim Endpoint'i (GÜNCELLENDİ v2)
+    # 3. 🔒 GRAMMAR / TENSES NET TESPİTİ
+    grammar_keywords = [
+        "grammar", "tense", "tenses",
+        "present", "past", "future",
+        "conditional", "if clause",
+        "passive", "reported speech"
+    ]
+
+    is_grammar = any(k in topic.lower() for k in grammar_keywords)
+
+    # 4. PROMPT OLUŞTURMA
+    if is_grammar:
+        # --- 🔥 GRAMMAR MODU ---
+        final_prompt = f"""
+SYSTEM OVERRIDE: YOU ARE A STRICT GRAMMAR EXAM GENERATOR.
+
+ABSOLUTE RULES:
+- Generate ONLY grammar-based fill-in-the-blank questions.
+- Each question MUST test verb tense or grammatical structure related to "{topic}".
+- DO NOT ask word meanings, synonyms, or reading comprehension.
+- If a question does NOT test grammar or tense, it is INVALID.
+
+MANDATORY QUESTION FORMAT:
+Sentence with ONE blank testing grammar.
+
+EXAMPLE:
+"If she ___ earlier, she would have caught the bus."
+A) leaves B) left C) had left D) has left
+
+TASK: Generate EXACTLY 5 multiple choice questions.
+STYLE: {selected_style} (ONLY for sentence context)
+DIFFICULTY: {difficulty}
+[Seed: {unique_seed}]
+"""
+    else:
+        # --- KELİME & GENEL MOD ---
+        final_prompt = f"""
+MODE: VOCABULARY & USAGE
+TOPIC: {topic}
+CONTEXT: {selected_style}
+TASK: Generate 5 engaging multiple choice questions.
+INSTRUCTIONS: Focus on vocabulary meaning, usage, or comprehension.
+DIFFICULTY: {difficulty}
+[Seed: {unique_seed}]
+"""
+
+    # 5. AI Servisine Gönder
+    questions = await ai_service.generate_mcq_quiz(final_prompt, difficulty)
+
+    if not questions:
+        raise HTTPException(status_code=500, detail="AI soru üretemedi.")
+
+    # 6. 🛡️ FAIL-SAFE (SADECE GRAMMAR İÇİN DEVREYE GİRER)
+    # Düzeltme: Bu bloğu sadece is_grammar True ise çalıştırıyoruz!
+    if is_grammar:
+        banned_phrases = [
+            "closest in meaning", "what does", "definition",
+            "synonym", "mean?", "which word means"
+        ]
+
+        filtered_questions = []
+
+        for q in questions:
+            text = q.question.lower()
+
+            # 1. Yasaklı kelime var mı?
+            if any(bp in text for bp in banned_phrases):
+                continue
+            
+            # 2. Boşluk (___) var mı?
+            if "___" not in q.question:
+                continue
+
+            filtered_questions.append(q)
+
+        # Eğer sağlam soru sayısı 5'ten azsa hata ver
+        if len(filtered_questions) < 5:
+            # (Opsiyonel: Hata vermek yerine olduğu kadarını döndürebilirsin ama katı olmak iyidir)
+             raise HTTPException(
+                status_code=500,
+                detail="Grammar mode failed: AI produced non-grammar questions."
+            )
+        
+        # Filtrelenmiş temiz soruları ana değişkene ata
+        questions = filtered_questions
+
+    quiz_id = str(uuid.uuid4())
+    storage.quizzes[quiz_id] = QuizWrapper(quiz_id, questions, difficulty) # <-- BUNU EKLEMEZSEN AI PUANLAYAMAZ
+    
+    return {"quiz_id": quiz_id, "questions": questions}
+
+
+
 @app.post("/submit-assignment")
 async def submit_assignment_unified(
     req: UnifiedSubmissionRequest, 
@@ -444,15 +541,76 @@ async def submit_speaking(
     }
 # [UC4] Quiz Submission
 @app.post("/mcq/quiz/submit")
-async def submit_mcq_quiz(req: schemas.QuizSubmitRequest, token: str = Query(...), db: Session = Depends(get_db)):
+async def submit_mcq_quiz(
+    req: schemas.QuizSubmitRequest, 
+    token: str = Query(...), 
+    db: Session = Depends(get_db)
+):
     user = get_current_user(token, db)
+    
+    # 1. Quiz'i Hafızadan Bul
     quiz = storage.quizzes.get(req.quiz_id)
-    if not quiz: raise HTTPException(404, "Quiz bulunamadı veya süresi doldu.")
+    if not quiz: 
+        raise HTTPException(404, "Quiz bulunamadı veya süresi doldu.")
 
     correct = 0
-    mistakes_text = []
+    mistakes_list_for_ai = [] 
+    mistakes_db_objects = [] 
 
-    # 1. Submission Oluştur 
+    # 2. Soruları Kontrol Et (PYTHON İLE KESİN HESAP)
+    for q in quiz.questions:
+        student_answer = str(req.answers.get(q.id, "")).strip()
+        correct_answer = str(q.correct_answer).strip()
+        
+        # Karşılaştırma (Büyük/Küçük harf duyarsız)
+        if student_answer.lower() == correct_answer.lower():
+            correct += 1
+        else:
+            # Yanlış cevapları listele
+            mistakes_list_for_ai.append({
+                "question": q.question,
+                "your_answer": student_answer if student_answer else "Boş",
+                "correct_answer": correct_answer
+            })
+            
+            mistakes_db_objects.append(models.MistakeDB(
+                id=str(uuid.uuid4()),
+                submission_id=None, 
+                error_type="Wrong Answer",
+                description=f"Soru: {q.question} | Cevabın: {student_answer}",
+                suggestion="Review this topic." 
+            ))
+
+    # Skoru Hesapla (Kesin Matematik)
+    total_questions = len(quiz.questions)
+    score = int((correct / total_questions) * 100) if total_questions > 0 else 0
+    
+    # KONSOL ÇIKTISI (Kontrol etmen için)
+    print(f"DEBUG: Python Hesabı -> Doğru: {correct}/{total_questions} | Puan: {score}")
+
+    # 3. AI Servisinden Yorum İste
+    ai_comment_text = ""
+    detailed_feedback = []
+
+    try:
+        # AI'ya hataları gönderiyoruz, o da yorumluyor
+        ai_response = await ai_service.generate_mcq_feedback_tr_structured(score, mistakes_list_for_ai)
+        
+        # AI'nın 'summary'sini alıyoruz ama SKOR olarak değil, YORUM olarak kullanacağız
+        ai_comment_text = ai_response.get("summary", "Analiz tamamlandı.")
+        detailed_feedback = ai_response.get("question_feedback", [])
+        
+    except Exception as e:
+        print(f"AI Error: {e}")
+        ai_comment_text = "AI bağlantısında sorun oluştu, ancak skorunuz kaydedildi."
+        detailed_feedback = []
+
+    # --- [DÜZELTME BURASI] ---
+    # Skor bilgisini BİZ yazıyoruz (Python), AI'ya bırakmıyoruz.
+    # AI'nın yorumunu sadece sonuna ekliyoruz.
+    final_feedback_text = f"Sonuç: {total_questions} soruda {correct} doğru yaptınız. (Puan: {score})\n\nAI Yorumu: {ai_comment_text}"
+
+    # 4. Submission Oluştur 
     submission = models.SubmissionDB(
         id=str(uuid.uuid4()), 
         student_id=user.id,
@@ -462,47 +620,36 @@ async def submit_mcq_quiz(req: schemas.QuizSubmitRequest, token: str = Query(...
     db.add(submission)
     db.commit() 
 
-    
-    # 2. Soruları Kontrol Et
-    for q in quiz.questions:
-        student_answer = req.answers.get(q.id)
-        if student_answer == q.correct_answer:
-            correct += 1
-        else:
-            mistake_desc = f"Q: {q.question} | Your: {student_answer} | Correct: {q.correct_answer}"
-            mistakes_text.append(mistake_desc)
-            
-            db.add(models.MistakeDB(
-                submission_id=submission.id,
-                error_type="Wrong Answer",
-                description=mistake_desc,
-                suggestion="Review this topic."
-            ))
-
-    score = int((correct / len(quiz.questions)) * 100) if quiz.questions else 0
-    
-    # 3. Sonuç ve Feedback Kaydet
-    feedback_summary = f"Quiz Result: {correct}/{len(quiz.questions)} correct."
-    if mistakes_text:
-        feedback_summary += "\n\n❌ MISTAKES:\n" + "\n".join(mistakes_text)
-    else:
-        feedback_summary += "\n\n🎉 Perfect Score!"
-
+    # 5. Kayıt (Evaluation)
     evaluation = models.EvaluationDB(
         submission_id=submission.id,
-        score=score,
-        feedback_text=feedback_summary 
+        score=score,                    # <-- KESİN PYTHON SKORU
+        feedback_text=final_feedback_text # <-- BİZİM OLUŞTURDUĞUMUZ METİN
     )
     db.add(evaluation)
+
+    # 6. Hataları Kaydet
+    for m_db in mistakes_db_objects:
+        m_db.submission_id = submission.id
+        # AI önerilerini işle
+        for df in detailed_feedback:
+            if df.get("question") in m_db.description:
+                m_db.suggestion = f"Doğru: {df.get('correct_answer')} -> {df.get('explanation')}"
+        db.add(m_db)
+
     db.commit()
     
-    # 4. HOCAYA BİLDİRİM
+    # 7. Bildirimler
     notify_class_teacher(db, user.id, "Quiz")
-    
     log_action(db, user.id, "SUBMIT_QUIZ", f"Score: {score}")
 
-    return {"score": score, "correct": correct, "total": len(quiz.questions)}
-# ---------------------------------------------------------
+    return {
+        "score": score, 
+        "correct": correct, 
+        "total": total_questions,
+        # Frontend'de görünecek kısım
+        "feedback": final_feedback_text 
+    }
 # 👩‍🏫 TEACHER ENDPOINTS (GÜNCELLENMİŞ VE YENİLER)
 # ---------------------------------------------------------
 
@@ -1117,54 +1264,77 @@ def delete_user(user_id: str, token: str = Query(...), db: Session = Depends(get
     if not target_user: 
         raise HTTPException(404, "Kullanıcı bulunamadı")
     
-    try:
-        # --- HOCA KONTROLÜ ---
-        # Eğer hocanın sınıfı varsa silmeyi engelle
-        if target_user.role == "teacher":
-            teacher_class = db.query(models.ClassDB).filter(models.ClassDB.teacher_id == target_user.id).first()
-            if teacher_class:
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Bu hoca '{teacher_class.name}' sınıfının yöneticisi. Önce sınıfı silin veya başka hocaya atayın."
-                )
+    # Kendi kendini silmeyi engelle
+    if target_user.id == user.id:
+        raise HTTPException(400, "Kendinizi silemezsiniz.")
 
-        # --- TEMİZLİK OPERASYONU ---
+    try:
+        # --- HOCA İŞLEMLERİ ---
+        if target_user.role == "teacher":
+            teacher_classes = db.query(models.ClassDB).filter(models.ClassDB.teacher_id == target_user.id).all()
+            for t_class in teacher_classes:
+                # Sınıftaki öğrencileri serbest bırak
+                students_in_class = db.query(models.UserDB).filter(models.UserDB.class_id == t_class.id).all()
+                for s in students_in_class:
+                    s.class_id = None
+                    db.add(s) # Değişikliği işaretle
+                
+                # Sınıfı sil
+                db.delete(t_class)
+            
+            # Hoca yorumlarını sil
+            db.query(models.TeacherReviewDB).filter(models.TeacherReviewDB.teacher_id == target_user.id).delete()
+            db.flush() # Hoca verilerini veritabanına işle
+
+        # --- ÖĞRENCİ VE GENEL TEMİZLİK ---
         
-        # 1. Kullanıcının Ödevlerini (Submission) ve bağlı notlarını sil
+        # [KRİTİK HAMLE 1] Öğrenciyi Sınıftan Kopart (Öğrenciyse)
+        # Eğer bir sınıfa bağlıysa, önce o bağ koparılmalı ki User tablosundan rahat silinsin.
+        if target_user.class_id is not None:
+            target_user.class_id = None
+            db.add(target_user)
+            db.flush() # İlişkiyi hemen kes
+
+        # 1. Submission (Ödev) ve Alt Verileri Sil
         submissions = db.query(models.SubmissionDB).filter(models.SubmissionDB.student_id == target_user.id).all()
         for sub in submissions:
+            # Önce alt tabloları temizle (Cascade yoksa şarttır)
             db.query(models.EvaluationDB).filter(models.EvaluationDB.submission_id == sub.id).delete()
             db.query(models.MistakeDB).filter(models.MistakeDB.submission_id == sub.id).delete()
             db.query(models.TeacherReviewDB).filter(models.TeacherReviewDB.submission_id == sub.id).delete()
+            
+            # Sonra ödevi sil
             db.delete(sub)
+        
+        # [KRİTİK HAMLE 2] Ara Temizlik
+        # Submissionlar silindikten sonra veritabanını "Flush" yaparak rahatlatıyoruz.
+        db.flush() 
 
         # 2. Bildirimleri Sil
         db.query(models.NotificationDB).filter(models.NotificationDB.user_id == target_user.id).delete()
         
-        # 3. [KRİTİK] Audit Loglarını (Geçmiş Kayıtlarını) Sil
-        
+        # 3. Logları Sil
         db.query(models.AuditLogDB).filter(models.AuditLogDB.user_id == target_user.id).delete()
 
-        # 4. Tokenları temizle
+        # 4. Tokenları temizle (Memory'den silme)
         keys_to_remove = [k for k, v in storage.tokens.items() if v == target_user.id]
         for k in keys_to_remove:
             del storage.tokens[k]
 
-        # --- SON VURUŞ: KULLANICIYI SİL ---
+        # --- SON VURUŞ (FİNAL SİLME) ---
         db.delete(target_user)
+        
+        # [KRİTİK HAMLE 3] Kalıcı Hale Getir
         db.commit()
 
-        # Loglama işlemini silinen kullanıcı için değil, silen admin (user.id) için yapıyoruz
         log_action(db, user.id, "DELETE_USER", f"Deleted user {target_user.email}")
         
-        return {"status": "success", "message": f"{target_user.email} silindi."}
+        return {"status": "success", "message": f"{target_user.email} ve verileri kalıcı olarak silindi."}
 
     except Exception as e:
-        db.rollback()
-        print(f"Silme Hatası: {e}")
-        # Hata detayını frontend'e gönderelim ki ne olduğunu görelim
+        db.rollback() # Hata olursa her şeyi geri al
+        print(f"Silme Hatası Detaylı: {e}")
         raise HTTPException(status_code=500, detail=f"Silme işlemi başarısız: {str(e)}")
-
 @app.get("/admin/stats")
 def get_admin_stats(token: str, db: Session = Depends(get_db)):
     user = get_current_user(token, db)
@@ -1185,30 +1355,30 @@ def get_admin_stats(token: str, db: Session = Depends(get_db)):
 # ---------------------------------------------------------
 @app.on_event("startup")
 def startup_event():
-    db = SessionLocal()
-    try:
-        # Öğrenci yoksa ekle
-        if not db.query(models.UserDB).filter(models.UserDB.email == "student@demo.com").first():
-            student = models.UserDB(
-                id=str(uuid.uuid4()), email="student@demo.com",
-                password_hash=_hash_password("1234"), role="student", first_name="Demo", last_name="Student"
-            )
-            db.add(student)
+    # db = SessionLocal()
+    # try:
+    #     # Öğrenci yoksa ekle - ARTIK EKLEME!
+    #     if not db.query(models.UserDB).filter(models.UserDB.email == "student@demo.com").first():
+    #         student = models.UserDB(
+    #             id=str(uuid.uuid4()), email="student@demo.com",
+    #             password_hash=_hash_password("1234"), role="student", first_name="Demo", last_name="Student"
+    #         )
+    #         db.add(student)
             
-        # Öğretmen yoksa ekle
-        if not db.query(models.UserDB).filter(models.UserDB.email == "teacher@demo.com").first():
-            teacher = models.UserDB(
-                id=str(uuid.uuid4()), email="teacher@demo.com",
-                password_hash=_hash_password("1234"), role="teacher", first_name="Demo", last_name="Teacher"
-            )
-            db.add(teacher)
-        db.commit()
-        print("✅ Demo users ready (student@demo.com / 1234)")
-    except Exception as e:
-        print(f"Startup Error: {e}")
-    finally:
-        db.close() 
-
+    #     # Öğretmen yoksa ekle - ARTIK EKLEME!
+    #     if not db.query(models.UserDB).filter(models.UserDB.email == "teacher@demo.com").first():
+    #         teacher = models.UserDB(
+    #             id=str(uuid.uuid4()), email="teacher@demo.com",
+    #             password_hash=_hash_password("1234"), role="teacher", first_name="Demo", last_name="Teacher"
+    #         )
+    #         db.add(teacher)
+    #     db.commit()
+    #     print("✅ Demo users check skipped.")
+    # except Exception as e:
+    #     print(f"Startup Error: {e}")
+    # finally:
+    #     db.close() 
+    pass # Fonksiyon boş kalmasın diye pass koyabilirsin
 # ---------------------------------------------------------
 # PROGRESS (HISTORY) ENDPOINT
 # ---------------------------------------------------------
