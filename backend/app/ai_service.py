@@ -433,30 +433,33 @@ FORMAT EXAMPLE:
             }
 
         prompt = f"""
-ROLE: English Teacher for Turkish students.
+ROLE: Expert English Teacher & Mentor for Turkish students.
 
-RULES:
-- Short explanations
-- Question based
-- Max 2-3 sentences
-- Turkish
+TASK: Analyze the student's quiz performance and provide a DETAILED, PERSONALIZED, and MOTIVATING feedback summary in Turkish.
 
-OUTPUT (JSON ONLY):
+INPUT DATA:
+- Score: {score}
+- Mistakes: {mistakes}
+
+OUTPUT FORMAT (JSON ONLY):
 {{
-  "summary": "Short encouraging summary",
+  "summary": "Detailed feedback text here...",
   "question_feedback": [
     {{
       "question": "...",
       "your_answer": "...",
       "correct_answer": "...",
-      "explanation": "Short rule explanation"
+      "explanation": "..."
     }}
   ]
 }}
 
-DATA:
-Score: {score}
-Mistakes: {mistakes}
+INSTRUCTIONS FOR 'summary' FIELD:
+1.  **Opening:** Start with a motivating short sentence.
+2.  **Assessment:** Summarize the student's general performance in 1-2 sentences. 
+3.  **Tone:** Encouraging and professional.
+4.  **Length:** CONCISE. Maximum 3 sentences total. DO NOT write long paragraphs.
+
 """
         try:
             # 🔥 YENİ FONKSİYONU KULLANIYORUZ
