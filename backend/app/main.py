@@ -574,7 +574,7 @@ async def submit_mcq_quiz(
             })
             
             mistakes_db_objects.append(models.MistakeDB(
-                id=str(uuid.uuid4()),
+                # id field is Auto-Increment Integer in DB, so we don't pass UUID
                 submission_id=None, 
                 error_type="Wrong Answer",
                 description=f"Soru: {q.question} | Cevabın: {student_answer}",
@@ -643,12 +643,49 @@ async def submit_mcq_quiz(
     notify_class_teacher(db, user.id, "Quiz")
     log_action(db, user.id, "SUBMIT_QUIZ", f"Score: {score}")
 
+    # KESİN ÇÖZÜM: 'mistakes' listesini AI açıklamalarıyla zenginleştiriyoruz
+    enriched_mistakes = []
+    
+    for m in mistakes_list_for_ai:
+        # Bu soru için AI'nın ürettiği detayı bul
+        # detailed_feedback bir liste, içinde {question, explanation...} var
+        explanation = f"Doğru: {m['correct_answer']}" # Varsayılan (AI bulamazsa)
+        
+        for df in detailed_feedback:
+            # Soru metni eşleşiyorsa (veya içeriyorsa)
+            if df.get("question") and (df.get("question") in m['question'] or m['question'] in df.get("question")):
+                # AI açıklamasını al
+                explanation = f"Doğru: {df.get('correct_answer')} -> {df.get('explanation')}"
+                break
+        
+        enriched_mistakes.append({
+            "error_type": "Wrong Answer",
+            "description": m['question'],
+            "suggestion": explanation
+        })
+
+    # [YENİ] Frontend Soru Analizi kısmı için TÜM soruları hazırlıyoruz (Sadece hataları değil)
+    full_quiz_analysis = []
+    for q in quiz.questions:
+        u_ans = str(req.answers.get(q.id, "")).strip()
+        full_quiz_analysis.append({
+            "question": q.question,
+            "your_answer": u_ans if u_ans else "Boş",
+            "correct_answer": q.correct_answer,
+            "explanation": "" # Bu listede açıklama göstermiyoruz artık
+        })
+
     return {
+        "type": "quiz",
         "score": score, 
         "correct": correct, 
         "total": total_questions,
-        # Frontend'de görünecek kısım
-        "feedback": final_feedback_text 
+        "feedback_text": final_feedback_text,
+        "mistakes": enriched_mistakes,
+        "feedback": { 
+            "summary": final_feedback_text,
+            "question_feedback": full_quiz_analysis # <-- ARTIK HEPSİNİ GÖNDERİYORUZ
+        }
     }
 # 👩‍🏫 TEACHER ENDPOINTS (GÜNCELLENMİŞ VE YENİLER)
 # ---------------------------------------------------------
