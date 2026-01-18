@@ -1,1 +1,11 @@
-pip install fastapi uvicorn python-multipart pydantic requests google-generativeai python-dotenv
+fastapi
+uvicorn
+sqlalchemy
+google-generativeai
+python-dotenv
+pydantic
+passlib
+bcrypt
+python-jose
+python-multipart
+pyodbc
