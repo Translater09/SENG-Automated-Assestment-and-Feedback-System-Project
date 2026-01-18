@@ -58,6 +58,13 @@ Each module produces:
 
 ---
 
+## ⚙️ Environment
+
+- Python version: Python 3.x (tested with Python 3.13.x)
+- Backend framework: FastAPI (served via Uvicorn)
+- Frontend: Node.js + npm
+
+---
 
 
 ## ▶️ How to Run the Project
