@@ -1,86 +1,75 @@
-# Automated Assessment and Feedback System (AAFS)
+ Automated Assessment and Feedback System (AAFS)
 
-An AI-powered web application that automatically evaluates **Speaking**, **Writing**, and **Quiz** submissions and provides instant feedback to students.
+An AI-powered web application designed to automatically evaluate student submissions in speaking, writing, and quizzes, and provide structured feedback.
 
----
+ Overview
 
-##  Features
+AAFS is a modular system that processes different types of user inputs and generates evaluation results using backend logic and AI-based analysis.
 
--  **Speaking Evaluation**
-  - Speech-based submissions
-  - AI-driven feedback and scoring
-
--  **Writing Evaluation**
-  - Text submissions
-  - Content, structure, and language analysis
-
--  **Quiz Module**
-  - Objective questions
-  - Automatic scoring
-
--  **Instant Feedback**
-  - Score + detailed feedback
-  - Stored results for later review
-
-
-
-- Frontend handles user interaction
-- Backend handles all logic and evaluation
-- AI module performs assessment
-- Results are stored and returned to users
+The system is designed with a clear separation of concerns:
+- Frontend: User interaction
+- Backend: API handling and evaluation logic
+- AI Module: Assessment and scoring
 
 ---
 
-## ⚙️ How the Code Works
+🧠 Features
 
-### 1️⃣ Submission Flow
-1. User selects **Speaking**, **Writing**, or **Quiz**
-2. Submission is sent to backend via API
-3. Backend validates and processes input
+ 🎤 Speaking Evaluation
+- Accepts speech/text-based submissions
+- Performs analysis on user responses
+- Generates feedback and scoring
 
----
+✍️ Writing Evaluation
+- Analyzes written submissions
+- Evaluates structure, clarity, and language usage
+- Produces detailed feedback
 
-### 2️⃣ Evaluation Logic
-- Speaking → speech/text analysis
-- Writing → content & language evaluation
-- Quiz → automatic answer checking
+ 📝 Quiz Module
+- Handles objective-type questions
+- Performs automatic answer validation
+- Generates instant scores
 
-Each module produces:
-- Score
-- Feedback text
-
----
-
-### 3️⃣ Result Handling
-- Evaluation results are saved
-- User can view feedback instantly
-- Results can be reloaded later
+⚡ Feedback System
+- Produces both score and qualitative feedback
+- Stores results for later retrieval
 
 ---
 
-## ⚙️ Environment
+ ⚙️ System Architecture
 
-- Python version: Python 3.x (tested with Python 3.13.x)
-- Backend framework: FastAPI (served via Uvicorn)
-- Frontend: Node.js + npm
+ 1. Submission Layer
+- Users submit data via frontend interface
+- Requests are sent to backend through REST API
+
+ 2. Processing Layer
+- Backend validates incoming data
+- Routes input to appropriate evaluation module
+
+ 3. Evaluation Layer
+- Speaking: speech/text analysis
+- Writing: NLP-based evaluation
+- Quiz: rule-based answer checking
+
+ 4. Result Layer
+- Scores and feedback are generated
+- Results are stored and returned to user
 
 ---
 
+🛠️ Technologies
 
-## ▶️ How to Run the Project
+- **Backend:** FastAPI, Python
+- **Frontend:** Node.js, npm
+- **Server:** Uvicorn
+- **Concepts:** API Design, Modular Architecture, AI-based Evaluation
 
+---
 
-Backend :
+## ▶️ Running the Project
 
+### Backend
+```bash
 uvicorn app.main:app --reload
-
-
-Frontend:
-
-npm install
-npm run dev
-
-
-and click on the UI link that appears
 
 
